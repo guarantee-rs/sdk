@@ -27,7 +27,7 @@ tokio = { version = "1", features = ["full"] }
 thiserror = "1"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
-guarantee-macros = { version = "0.1.0", path = "macros" }
+guarantee-macros = { version = "0.1.2", path = "macros" }
 aes-gcm = "0.10"
 hkdf = "0.12"
 hmac = "0.12"

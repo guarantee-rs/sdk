@@ -308,3 +308,123 @@ mod versioned_syntax {
         assert_eq!(state.signer().schema_version(), 3);
     }
 }
+
+// --- Backup and restore tests ---
+
+mod backup_restore {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize, Default, Clone, Debug)]
+    struct AppData {
+        counter: u64,
+    }
+
+    #[derive(Serialize, Deserialize, Default, Clone, Debug)]
+    struct PersistentSecrets {
+        api_key: String,
+    }
+
+    guarantee::state! {
+        #[mrenclave(version = 2)]
+        AppData,
+
+        #[mrsigner(version = 3)]
+        PersistentSecrets,
+    }
+
+    #[test]
+    fn backup_creates_files() {
+        let seal_dir = tempfile::tempdir().expect("seal_dir");
+        let backup_dir = tempfile::tempdir().expect("backup_dir");
+
+        let mut state = TeeState::initialize(seal_dir.path()).expect("initialize");
+        state.enclave_mut().app_data.counter = 42;
+        state.signer_mut().persistent_secrets.api_key = "key-abc".to_string();
+        state.seal(seal_dir.path()).expect("seal");
+
+        let backup_path = backup_dir.path().join("my_backup");
+        state.backup(seal_dir.path(), &backup_path).expect("backup");
+
+        assert!(backup_path.join("enclave.sealed").exists());
+        assert!(backup_path.join("signer.sealed").exists());
+        assert!(backup_path.join("backup_metadata.json").exists());
+    }
+
+    #[test]
+    fn backup_includes_metadata() {
+        let seal_dir = tempfile::tempdir().expect("seal_dir");
+        let backup_dir = tempfile::tempdir().expect("backup_dir");
+
+        let state = TeeState::initialize(seal_dir.path()).expect("initialize");
+        state.seal(seal_dir.path()).expect("seal");
+
+        let backup_path = backup_dir.path().join("meta_backup");
+        state.backup(seal_dir.path(), &backup_path).expect("backup");
+
+        let metadata_str = std::fs::read_to_string(backup_path.join("backup_metadata.json"))
+            .expect("read metadata");
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_str)
+            .expect("parse metadata");
+
+        assert!(metadata.get("backed_up_at").is_some());
+        assert_eq!(metadata["enclave_schema_version"], 2);
+        assert_eq!(metadata["signer_schema_version"], 3);
+    }
+
+    #[test]
+    fn restore_and_initialize() {
+        let seal_dir = tempfile::tempdir().expect("seal_dir");
+        let backup_dir = tempfile::tempdir().expect("backup_dir");
+
+        // Initialize and set values
+        let pub_key_bytes;
+        {
+            let mut state = TeeState::initialize(seal_dir.path()).expect("initialize");
+            state.enclave_mut().app_data.counter = 100;
+            state.signer_mut().persistent_secrets.api_key = "restore-key".to_string();
+            pub_key_bytes = state.public_key().to_bytes();
+            state.seal(seal_dir.path()).expect("seal");
+
+            let backup_path = backup_dir.path().join("backup");
+            state.backup(seal_dir.path(), &backup_path).expect("backup");
+        }
+
+        // Delete seal dir contents
+        std::fs::remove_dir_all(seal_dir.path()).expect("remove seal dir");
+
+        // Restore from backup
+        let backup_path = backup_dir.path().join("backup");
+        TeeState::restore(&backup_path, seal_dir.path()).expect("restore");
+
+        // Re-initialize from restored files
+        let state = TeeState::initialize(seal_dir.path()).expect("re-initialize");
+        assert_eq!(state.enclave().app_data().counter, 100);
+        assert_eq!(state.signer().persistent_secrets().api_key, "restore-key");
+        assert_eq!(state.public_key().to_bytes(), pub_key_bytes);
+    }
+
+    #[test]
+    fn restore_preserves_signer_state() {
+        let seal_dir = tempfile::tempdir().expect("seal_dir");
+        let backup_dir = tempfile::tempdir().expect("backup_dir");
+
+        // Initialize, mutate signer state, seal, backup
+        {
+            let mut state = TeeState::initialize(seal_dir.path()).expect("initialize");
+            state.signer_mut().persistent_secrets.api_key = "signer-secret-42".to_string();
+            state.seal(seal_dir.path()).expect("seal");
+
+            let backup_path = backup_dir.path().join("signer_backup");
+            state.backup(seal_dir.path(), &backup_path).expect("backup");
+        }
+
+        // Restore to a fresh directory
+        let restore_dir = tempfile::tempdir().expect("restore_dir");
+        let backup_path = backup_dir.path().join("signer_backup");
+        TeeState::restore(&backup_path, restore_dir.path()).expect("restore");
+
+        // Initialize from restored state -- signer data should be preserved
+        let state = TeeState::initialize(restore_dir.path()).expect("re-initialize");
+        assert_eq!(state.signer().persistent_secrets().api_key, "signer-secret-42");
+    }
+}

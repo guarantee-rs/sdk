@@ -109,7 +109,6 @@ enum SealSection {
 struct StateInput {
     mrenclave_types: Vec<Ident>,
     mrsigner_types: Vec<Ident>,
-    #[allow(dead_code)]
     external_types: Vec<Ident>,
 }
 
@@ -252,11 +251,6 @@ pub fn state(input: TokenStream) -> TokenStream {
             }
 
             impl SignerState {
-                /// Read-only access to the MRSIGNER-bound master encryption key.
-                pub fn master_key(&self) -> &[u8; 32] {
-                    &self.master_key
-                }
-
                 #(
                     /// Read-only accessor for the `#signer_fields` component.
                     pub fn #signer_fields(&self) -> &#signer_types {
@@ -456,25 +450,50 @@ pub fn state(input: TokenStream) -> TokenStream {
         quote! {}
     };
 
-    // Encryption methods on TeeState (only when mrsigner section exists, providing master key)
-    let encryption_methods = if has_signer {
+    // Per-type encryption methods on TeeState for each #[external] type.
+    // Each type gets its own derived key from master_key + "external:<snake_case_type>".
+    let external_snake_names: Vec<Ident> = parsed
+        .external_types
+        .iter()
+        .map(|t| format_ident!("{}", to_snake_case(&t.to_string())))
+        .collect();
+    let external_types_ref = &parsed.external_types;
+    let external_encrypted_names: Vec<Ident> = parsed
+        .external_types
+        .iter()
+        .map(|t| format_ident!("Encrypted{}", t))
+        .collect();
+    let external_purpose_strings: Vec<String> = parsed
+        .external_types
+        .iter()
+        .map(|t| format!("external:{}", to_snake_case(&t.to_string())))
+        .collect();
+
+    let encrypt_method_names: Vec<Ident> = external_snake_names
+        .iter()
+        .map(|s| format_ident!("encrypt_{}", s))
+        .collect();
+    let decrypt_method_names: Vec<Ident> = external_snake_names
+        .iter()
+        .map(|s| format_ident!("decrypt_{}", s))
+        .collect();
+
+    let encryption_methods = if has_signer && !parsed.external_types.is_empty() {
         quote! {
-            /// Encrypt a value using the MRSIGNER-bound master key.
-            /// For storing sensitive data in external systems (databases, Redis, S3).
-            pub fn encrypt<T: ::guarantee::crypto::Encryptable>(&self, value: &T) -> Result<T::Encrypted, ::guarantee::SdkError> {
-                value.encrypt(self.signer.master_key())
-            }
+            #(
+                /// Encrypt a value using a per-type derived key from the MRSIGNER-bound master key.
+                /// The key is derived at runtime via HKDF-SHA256 with purpose `"external:<type>"`.
+                pub fn #encrypt_method_names(&self, value: &#external_types_ref) -> Result<#external_encrypted_names, ::guarantee::SdkError> {
+                    let key = ::guarantee::crypto::derive_key(&self.signer.master_key, #external_purpose_strings.as_bytes());
+                    value.encrypt(&key)
+                }
 
-            /// Decrypt a value using the MRSIGNER-bound master key.
-            pub fn decrypt<T: ::guarantee::crypto::Encryptable>(&self, encrypted: &T::Encrypted) -> Result<T, ::guarantee::SdkError> {
-                T::decrypt_from(encrypted, self.signer.master_key())
-            }
-
-            /// Derive a purpose-specific 256-bit key from the master key using HKDF-SHA256.
-            /// The same purpose always produces the same derived key.
-            pub fn derive_key(&self, purpose: &[u8]) -> [u8; 32] {
-                ::guarantee::crypto::derive_key(self.signer.master_key(), purpose)
-            }
+                /// Decrypt a value using a per-type derived key from the MRSIGNER-bound master key.
+                pub fn #decrypt_method_names(&self, encrypted: &#external_encrypted_names) -> Result<#external_types_ref, ::guarantee::SdkError> {
+                    let key = ::guarantee::crypto::derive_key(&self.signer.master_key, #external_purpose_strings.as_bytes());
+                    #external_types_ref::decrypt_from(encrypted, &key)
+                }
+            )*
         }
     } else {
         quote! {}

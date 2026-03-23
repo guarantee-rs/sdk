@@ -34,9 +34,6 @@ fn tee_state_initializes_with_fresh_keys() {
     // Public key should be accessible via TeeState
     let _pub_key = state.public_key();
 
-    // Master key should be non-zero (probabilistically guaranteed)
-    assert_ne!(state.signer().master_key(), &[0u8; 32]);
-
     // User state should be defaults
     assert_eq!(state.enclave().session_state().user_id, "");
     assert_eq!(state.enclave().price_cache().price, 0.0);
@@ -47,14 +44,12 @@ fn tee_state_initializes_with_fresh_keys() {
 fn tee_state_persists_across_seal_unseal() {
     let dir = tempfile::tempdir().expect("tempdir");
 
-    let master_key_copy;
     let public_key_bytes;
     {
         let mut state = TeeState::initialize(dir.path()).expect("initialize");
         state.enclave_mut().session_state.user_id = "alice".to_string();
         state.enclave_mut().price_cache.price = 99.5;
         state.signer_mut().user_secrets.api_key = "secret-123".to_string();
-        master_key_copy = *state.signer().master_key();
         public_key_bytes = state.public_key().to_bytes();
         state.seal(dir.path()).expect("seal");
     }
@@ -64,7 +59,6 @@ fn tee_state_persists_across_seal_unseal() {
     assert_eq!(state.enclave().session_state().user_id, "alice");
     assert_eq!(state.enclave().price_cache().price, 99.5);
     assert_eq!(state.signer().user_secrets().api_key, "secret-123");
-    assert_eq!(state.signer().master_key(), &master_key_copy);
     assert_eq!(state.public_key().to_bytes(), public_key_bytes);
 }
 
@@ -102,14 +96,6 @@ fn sign_response_signature_verifies() {
     let hash_bytes = hex_decode(&header.payload_hash_hex);
     let pub_key = state.public_key();
     assert!(pub_key.verify(&hash_bytes, &signature).is_ok());
-}
-
-#[test]
-fn master_key_is_read_only() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let state = TeeState::initialize(dir.path()).expect("initialize");
-    let _key = state.signer().master_key();
-    // Cannot set it -- no setter method exists
 }
 
 #[test]
@@ -205,7 +191,6 @@ mod signer_only {
     fn signer_only_state_works() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut state = TeeState::initialize(dir.path()).expect("initialize");
-        assert_ne!(state.signer().master_key(), &[0u8; 32]);
         state.signer_mut().credentials.secret = "top-secret".to_string();
         state.seal(dir.path()).expect("seal");
 

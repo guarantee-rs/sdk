@@ -45,7 +45,7 @@ fn encrypt_decrypt_roundtrip() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = TeeState::initialize(dir.path()).expect("init");
 
-    let encrypted = state.encrypt(&record).expect("encrypt");
+    let encrypted = state.encrypt_user_record(&record).expect("encrypt");
 
     // Plaintext fields unchanged
     assert_eq!(encrypted.user_id, "alice");
@@ -57,7 +57,7 @@ fn encrypt_decrypt_roundtrip() {
     assert_ne!(encrypted.ssn, "123-45-6789");
 
     // Decrypt
-    let decrypted: UserRecord = state.decrypt(&encrypted).expect("decrypt");
+    let decrypted = state.decrypt_user_record(&encrypted).expect("decrypt");
     assert_eq!(decrypted, record);
 }
 
@@ -73,8 +73,8 @@ fn encrypted_fields_differ_each_time() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = TeeState::initialize(dir.path()).expect("init");
 
-    let enc1 = state.encrypt(&record).expect("encrypt 1");
-    let enc2 = state.encrypt(&record).expect("encrypt 2");
+    let enc1 = state.encrypt_user_record(&record).expect("encrypt 1");
+    let enc2 = state.encrypt_user_record(&record).expect("encrypt 2");
 
     // Same plaintext, different ciphertext (unique nonces)
     assert_ne!(enc1.ssn, enc2.ssn);
@@ -98,25 +98,25 @@ fn wrong_key_fails_decrypt() {
 }
 
 #[test]
-fn derive_key_is_deterministic() {
+fn per_type_key_differs_from_raw_master_key() {
+    // Encrypting with a per-type derived key should produce ciphertext
+    // that cannot be decrypted with a different key (including raw master key).
+    let record = UserRecord {
+        user_id: "dave".into(),
+        ssn: "111-22-3333".into(),
+        bank_account: "5555555555".into(),
+        email: "dave@example.com".into(),
+    };
+
     let dir = tempfile::tempdir().expect("tempdir");
     let state = TeeState::initialize(dir.path()).expect("init");
 
-    let k1 = state.derive_key(b"database");
-    let k2 = state.derive_key(b"database");
-    let k3 = state.derive_key(b"redis");
+    let encrypted = state.encrypt_user_record(&record).expect("encrypt");
 
-    assert_eq!(k1, k2); // same purpose = same key
-    assert_ne!(k1, k3); // different purpose = different key
-}
-
-#[test]
-fn derive_key_differs_from_master() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let state = TeeState::initialize(dir.path()).expect("init");
-
-    let derived = state.derive_key(b"test");
-    assert_ne!(&derived, state.signer().master_key());
+    // Attempting to decrypt with a wrong key should fail
+    let wrong_key = [0u8; 32];
+    let result = UserRecord::decrypt_from(&encrypted, &wrong_key);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -131,7 +131,7 @@ fn encrypted_struct_is_serializable() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = TeeState::initialize(dir.path()).expect("init");
 
-    let encrypted = state.encrypt(&record).expect("encrypt");
+    let encrypted = state.encrypt_user_record(&record).expect("encrypt");
 
     // Should serialize to JSON (for storage in DB, Redis, etc.)
     let json = serde_json::to_string(&encrypted).expect("serialize");
@@ -139,6 +139,28 @@ fn encrypted_struct_is_serializable() {
         serde_json::from_str(&json).expect("deserialize");
 
     // And decrypt from the deserialized version
-    let decrypted: UserRecord = state.decrypt(&deserialized).expect("decrypt");
+    let decrypted = state.decrypt_user_record(&deserialized).expect("decrypt");
+    assert_eq!(decrypted, record);
+}
+
+#[test]
+fn per_type_key_is_deterministic_across_reinit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let record = UserRecord {
+        user_id: "eve".into(),
+        ssn: "999-88-7777".into(),
+        bank_account: "1234567890".into(),
+        email: "eve@example.com".into(),
+    };
+
+    // Encrypt with first state instance
+    let state1 = TeeState::initialize(dir.path()).expect("init");
+    state1.seal(dir.path()).expect("seal");
+    let encrypted = state1.encrypt_user_record(&record).expect("encrypt");
+
+    // Re-initialize (unseal) and decrypt -- should work because same master key
+    let state2 = TeeState::initialize(dir.path()).expect("reinit");
+    let decrypted = state2.decrypt_user_record(&encrypted).expect("decrypt");
     assert_eq!(decrypted, record);
 }

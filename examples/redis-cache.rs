@@ -28,7 +28,7 @@ use axum::{
     extract::{Extension, Path},
     http::StatusCode,
     response::{IntoResponse, Json},
-    routing::{delete, get, post},
+    routing::{get, post},
     Router,
 };
 use guarantee::{state, attest, Encrypted, crypto::Encryptable};

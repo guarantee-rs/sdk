@@ -1,0 +1,216 @@
+---
+import Layout from "../layouts/Layout.astro";
+---
+
+<Layout isHome={true}>
+  <main>
+    <!-- Hero -->
+    <section class="home-hero">
+      <div class="home-hero-text">
+        <h2>Prove your code runs where you say it runs.</h2>
+        <p>
+          Add <code>#[attest]</code> to any axum handler. Guarantee generates an Ed25519 keypair
+          inside the enclave, binds it to the enclave measurement with an SGX DCAP
+          quote, and signs every response. Callers verify the full chain — hardware
+          to JSON — without trusting you, your servers, or GuaranTEE.
+        </p>
+        <div class="btn-group">
+          <a href="/docs/getting-started" class="btn btn-primary">Get Started</a>
+          <a href="/docs/how-it-works" class="btn btn-outline">How It Works</a>
+        </div>
+        <a href="https://guarantee.rs" target="_blank" rel="noopener noreferrer" class="home-tertiary-link">
+          Managed deployment → guarantee.rs ↗
+        </a>
+      </div>
+      <div class="home-hero-terminal">
+        <div class="home-hero-terminal-bar">
+          <span class="home-hero-terminal-dot"></span>
+          <span class="home-hero-terminal-dot"></span>
+          <span class="home-hero-terminal-dot"></span>
+        </div>
+        <pre class="home-hero-terminal-body"><code>$ curl -i https://oracle.example.com/price{"\n"}{"\n"}HTTP/2 200{"\n"}x-tee-attestation: v=1; sig=mFz3...rK9=;{"\n"}  hash=a4f2...91c; ts=1743724800;{"\n"}  key=04ab...f3{"\n"}x-tee-verified: true{"\n"}x-tee-request-id: 7a3b...e91f{"\n"}{"\n"}{"symbol":"BTC","price":67432.50}</code></pre>
+      </div>
+    </section>
+
+    <!-- 01 Core Principles -->
+    <div class="section-header">
+      <h3>Core Principles</h3>
+      <span class="mono">01 // Architecture</span>
+    </div>
+    <div class="home-grid-3">
+      <div class="home-grid-item">
+        <h3>Hardware Attestation</h3>
+        <p>Every response is signed with an ephemeral Ed25519 key. The key is bound to the exact binary measurement (MRENCLAVE) via an Intel SGX DCAP quote. Any caller verifies the chain independently — no trust in the operator required.</p>
+      </div>
+      <div class="home-grid-item">
+        <h3>Sealed State</h3>
+        <p>Two-tier encrypted persistence. MRENCLAVE state resets on redeploy — correct for caches and ephemeral sessions. MRSIGNER state survives binary updates — correct for private keys and long-lived configuration.</p>
+      </div>
+      <div class="home-grid-item">
+        <h3>Zero Conditional Compilation</h3>
+        <p>The same binary runs in dev mode on a laptop and inside a Gramine SGX enclave in production. No <code>#[cfg(feature = "sgx")]</code>. No hardware needed to develop or test. Set <code>GUARANTEE_ENCLAVE=1</code> at deploy time.</p>
+      </div>
+    </div>
+
+    <!-- 02 Quickstart -->
+    <div class="section-header">
+      <h3>Implementation</h3>
+      <span class="mono">02 // Quickstart</span>
+    </div>
+    <div class="home-tech">
+      <div class="home-tech-info">
+        <p>
+          Install the crate. Annotate any axum handler with <code>#[attest]</code>. On first request,
+          the SDK reads the DCAP quote from <code>/dev/attestation</code>, extracts MRENCLAVE, and
+          binds the ephemeral signing key. Every subsequent response carries a verifiable
+          signature. No other changes to your service.
+        </p>
+        <div class="install-box">
+          <span>$ cargo add guarantee</span>
+          <span class="install-box-copy" data-copy="cargo add guarantee">[COPY]</span>
+        </div>
+        <div class="install-box">
+          <span>$ cargo run --example hello-tee</span>
+          <span class="install-box-copy" data-copy="cargo run --example hello-tee">[COPY]</span>
+        </div>
+      </div>
+      <div class="home-tech-code">
+        <pre><code>// Attested axum service — full SGX chain in ~20 lines{"\n"}use guarantee::&#123;attest, state&#125;;{"\n"}use axum::&#123;response::Json, routing::get, Router&#125;;{"\n"}{"\n"}state! &#123;{"\n"}    // Resets on redeploy (new binary = new measurement){"\n"}    #[mrenclave]{"\n"}    AppData,{"\n"}&#125;{"\n"}{"\n"}// One attribute. Every response gets X-TEE-Attestation.{"\n"}#[attest]{"\n"}async fn hello() -&gt; Json&lt;serde_json::Value&gt; &#123;{"\n"}    Json(serde_json::json!(&#123; "message": "hello from TEE" &#125;)){"\n"}&#125;{"\n"}{"\n"}#[tokio::main]{"\n"}async fn main() &#123;{"\n"}    let state = TeeState::initialize(Path::new("./sealed")).unwrap();{"\n"}    let app = Router::new(){"\n"}        .route("/hello", get(hello)){"\n"}        .layer(Extension(Arc::new(RwLock::new(state))));{"\n"}{"\n"}    // curl response includes:{"\n"}    // X-TEE-Attestation: v=1; sig=...; hash=...; ts=...; key=...{"\n"}    axum::serve(listener, app).await.unwrap();{"\n"}&#125;</code></pre>
+      </div>
+    </div>
+
+    <!-- 03 How It Works -->
+    <div class="section-header">
+      <h3>Attestation Chain</h3>
+      <span class="mono">03 // How It Works</span>
+    </div>
+    <div class="home-steps">
+      <div class="home-step">
+        <div class="home-step-num">01</div>
+        <h4>Key Generation</h4>
+        <p>At startup, the SDK generates an ephemeral Ed25519 keypair entirely inside enclave memory. The private key is never serialised, never logged, and never leaves the enclave boundary.</p>
+      </div>
+      <div class="home-step">
+        <div class="home-step-num">02</div>
+        <h4>DCAP Quote</h4>
+        <p>The SDK writes SHA-256(public_key) to /dev/attestation/user_report_data and reads back an Intel DCAP quote. The quote cryptographically binds MRENCLAVE + MRSIGNER to that specific key.</p>
+      </div>
+      <div class="home-step">
+        <div class="home-step-num">03</div>
+        <h4>Response Signed</h4>
+        <p>#[attest] signs SHA-256(body ‖ timestamp_ms ‖ request_id) with the enclave key on every response. The signature and public key are attached as X-TEE-Attestation.</p>
+      </div>
+      <div class="home-step">
+        <div class="home-step-num">04</div>
+        <h4>Independent Verification</h4>
+        <p>Any caller fetches /.well-known/tee-attestation once, verifies the DCAP quote against Intel hardware, then checks every response signature. No trust in GuaranTEE or the operator required.</p>
+      </div>
+    </div>
+
+    <!-- 04 API Surface -->
+    <div class="section-header">
+      <h3>API Surface</h3>
+      <span class="mono">04 // Reference</span>
+    </div>
+    <table class="home-api-table">
+      <thead>
+        <tr><th>Export</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>#[attest]</td><td>Attribute macro — signs every response with the enclave key</td></tr>
+        <tr><td>state! &#123; &#125;</td><td>Declares two-tier sealed state with auto-generated accessors</td></tr>
+        <tr><td>#[derive(Encrypted)]</td><td>Generates encrypted struct variant with AES-256-GCM</td></tr>
+        <tr><td>EnclaveAttestor</td><td>Core struct — keypair, startup quote, response signing</td></tr>
+        <tr><td>MrEnclave / MrSigner</td><td>32-byte enclave identity value types</td></tr>
+        <tr><td>StartupQuote</td><td>SGX DCAP quote binding key to enclave measurement</td></tr>
+        <tr><td>AttestationHeader</td><td>Per-response signature — parse with from_header_value()</td></tr>
+        <tr><td>seal_to_file()</td><td>Low-level sealing to disk (MRENCLAVE or MRSIGNER mode)</td></tr>
+        <tr><td>encrypt_field()</td><td>AES-256-GCM field encryption with optional key versioning</td></tr>
+        <tr><td>derive_key()</td><td>HKDF-SHA256 purpose-specific key derivation</td></tr>
+        <tr><td>serve_ra_tls()</td><td>HTTPS server with attestation-embedded X.509 certificates</td></tr>
+        <tr><td>gramine::write_user_report_data()</td><td>Write 64 bytes to /dev/attestation/user_report_data</td></tr>
+        <tr><td>gramine::read_quote()</td><td>Read the raw DCAP quote from /dev/attestation/quote</td></tr>
+        <tr><td>guarantee::connect()</td><td>RA-TLS client — verifies remote enclave before connecting (feature: ra-tls)</td></tr>
+      </tbody>
+    </table>
+
+    <!-- 05 Examples -->
+    <div class="section-header">
+      <h3>Examples</h3>
+      <span class="mono">05 // Use Cases</span>
+    </div>
+    <div class="home-examples">
+      <a href="/docs/hello-tee" class="home-example-card">
+        <span class="home-example-tag">Starter</span>
+        <h4>Hello TEE</h4>
+        <p>The minimum viable attested service. One handler, one #[attest], the full SGX attestation chain. Start here.</p>
+      </a>
+      <a href="/docs/oracle" class="home-example-card">
+        <span class="home-example-tag">DeFi</span>
+        <h4>Price Oracle</h4>
+        <p>MRENCLAVE-scoped state with background price updates. Every price response is signed — consumers verify without calling a price feed contract.</p>
+      </a>
+      <a href="/docs/btc-signer" class="home-example-card">
+        <span class="home-example-tag">Custody</span>
+        <h4>Bitcoin Signer</h4>
+        <p>MRSIGNER-sealed private key custody. The key survives binary updates but never leaves enclave memory. No HSM required.</p>
+      </a>
+      <a href="/docs/postgres-encrypted" class="home-example-card">
+        <span class="home-example-tag">Database</span>
+        <h4>Encrypted Postgres</h4>
+        <p>AES-256-GCM field encryption before INSERT. The database stores only ciphertext. Keys are derived from the enclave master key and never written to disk in plaintext.</p>
+      </a>
+      <a href="/docs/redis-cache" class="home-example-card">
+        <span class="home-example-tag">Cache</span>
+        <h4>Encrypted Redis</h4>
+        <p>Selective field encryption for cache values. Sensitive fields encrypted with per-key derivation. Queryable fields left in plaintext. Zero change to Redis configuration.</p>
+      </a>
+      <a href="/docs/websocket-ratls" class="home-example-card">
+        <span class="home-example-tag">Streaming</span>
+        <h4>WebSocket RA-TLS</h4>
+        <p>Real-time attested data streaming. WebSocket over RA-TLS — the entire channel is authenticated to the enclave with zero per-message overhead.</p>
+      </a>
+    </div>
+
+    <!-- 06 Configuration -->
+    <div class="section-header">
+      <h3>Configuration</h3>
+      <span class="mono">06 // Environment</span>
+    </div>
+    <div class="home-config">
+      <div class="home-config-item">
+        <div class="home-config-key">GUARANTEE_ENCLAVE=1</div>
+        <div class="home-config-val">Enclave mode. Reads /dev/attestation/* for real SGX DCAP quotes. Requires Gramine. Unset for dev mode.</div>
+      </div>
+      <div class="home-config-item">
+        <div class="home-config-key">(unset)</div>
+        <div class="home-config-val">Dev mode. Mock quote with 0xDE fill bytes. Same API surface, real Ed25519 signatures, no hardware required. Use in CI.</div>
+      </div>
+      <div class="home-config-item">
+        <div class="home-config-key">GUARANTEE_ATTEST_MODE=startup-only</div>
+        <div class="home-config-val">Disables per-response signing. Startup quote still generated. Use when callers only need MRENCLAVE, not response provenance.</div>
+      </div>
+      <div class="home-config-item">
+        <div class="home-config-key">PORT</div>
+        <div class="home-config-val">HTTP listen port. Defaults to 8080. Used by all examples.</div>
+      </div>
+    </div>
+
+    <!-- Managed platform CTA -->
+    <div class="home-platform-cta">
+      <span>Want managed enclave deployment?</span>
+      <a href="https://guarantee.rs" target="_blank" rel="noopener noreferrer" class="mono">
+        guarantee.rs ↗
+      </a>
+    </div>
+  </main>
+</Layout>
+
+<script>
+  document.querySelectorAll('.install-box-copy').forEach(el => {
+    el.addEventListener('click', () => {
+      const text = el.getAttribute('data-copy');
+      if (text) navigator.clipboard.writeText(text);
+    });
+  });
+</script>

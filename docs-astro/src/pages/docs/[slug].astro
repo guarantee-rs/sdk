@@ -1,0 +1,160 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import { docs } from "../../data/docs-content";
+import type { GetStaticPaths } from "astro";
+
+const PAGE_TITLES: Record<string, string> = {
+  "getting-started": "Getting Started — Rust SGX Attestation in 5 min | Guarantee SDK",
+  "how-it-works": "SGX Attestation Chain — DCAP, MRENCLAVE, Ed25519 | Guarantee SDK",
+  "attestation": "Attestation Types — MrEnclave, StartupQuote, DCAP | Guarantee SDK",
+  "state": "MRENCLAVE-Scoped State in Gramine Enclaves — state! macro | Guarantee SDK",
+  "encryption": "AES-256-GCM Field Encryption in SGX Enclaves | Guarantee SDK",
+  "sealing": "Enclave State Sealing — MRENCLAVE vs MRSIGNER | Guarantee SDK",
+  "attest-macro": "#[attest] Macro — Per-Response Ed25519 Signing | Guarantee SDK",
+  "state-macro": "state! Macro — Two-Tier Sealed State | Guarantee SDK",
+  "encrypted-derive": "#[derive(Encrypted)] — AES-256-GCM Field Encryption | Guarantee SDK",
+  "crypto": "Crypto Utilities — encrypt_field, derive_key, HKDF | Guarantee SDK",
+  "enclave-attestor": "EnclaveAttestor API — Keypair, Quote, Signing | Guarantee SDK",
+  "ra-tls": "RA-TLS for Rust — SGX Quote in TLS Certificate | Guarantee SDK",
+  "errors": "SdkError Reference — Error Handling | Guarantee SDK",
+  "hello-tee": "Hello TEE Example — Minimal Attested Service | Guarantee SDK",
+  "oracle": "Price Oracle Example — Attested DeFi Feed | Guarantee SDK",
+  "btc-signer": "Bitcoin Signer Example — SGX Key Custody | Guarantee SDK",
+  "postgres-encrypted": "Encrypted Postgres Example — Field-Level AES | Guarantee SDK",
+  "redis-cache": "Encrypted Redis Example — Selective Cache Encryption | Guarantee SDK",
+  "websocket-ratls": "WebSocket RA-TLS Example — Attested Real-Time Streaming | Guarantee SDK",
+};
+
+const sections = [
+  { label: "Introduction", slugs: ["getting-started", "how-it-works"] },
+  { label: "Concepts", slugs: ["attestation", "state", "encryption", "sealing"] },
+  { label: "SDK Reference", slugs: ["attest-macro", "state-macro", "encrypted-derive", "crypto", "enclave-attestor", "ra-tls", "errors"] },
+  { label: "Examples", slugs: ["hello-tee", "oracle", "btc-signer", "postgres-encrypted", "redis-cache", "websocket-ratls"] },
+];
+
+const allSlugs = sections.flatMap((s) => s.slugs);
+
+export const getStaticPaths: GetStaticPaths = () => {
+  return allSlugs.map((slug) => ({ params: { slug } }));
+};
+
+const { slug } = Astro.params;
+const doc = docs.find((d) => d.slug === slug);
+const sectionLabel = sections.find((s) => s.slugs.includes(slug!))?.label ?? "";
+
+const idx = allSlugs.indexOf(slug!);
+const prevSlug = idx > 0 ? allSlugs[idx - 1] : null;
+const nextSlug = idx < allSlugs.length - 1 ? allSlugs[idx + 1] : null;
+const prevDoc = prevSlug ? docs.find((d) => d.slug === prevSlug) : null;
+const nextDoc = nextSlug ? docs.find((d) => d.slug === nextSlug) : null;
+
+const pageTitle = PAGE_TITLES[slug!] || `${slug} | Guarantee SDK`;
+---
+
+<Layout title={pageTitle}>
+  <div class="doc-layout">
+    <aside class="doc-sidebar">
+      {sections.map((sec) => (
+        <div class="doc-sidebar-section">
+          <div class="doc-sidebar-title">{sec.label}</div>
+          {sec.slugs.map((s) => {
+            const d = docs.find((x) => x.slug === s);
+            return (
+              <a href={`/docs/${s}`} class={slug === s ? "active" : ""}>
+                {d?.title ?? s}
+              </a>
+            );
+          })}
+        </div>
+      ))}
+    </aside>
+
+    <main class="doc-content">
+      {doc ? (
+        <>
+          <div class="doc-module-label">
+            {sectionLabel.toUpperCase()} // {doc.title.toUpperCase()}
+          </div>
+          <h1>{doc.title}</h1>
+          <p class="doc-lead">{doc.lead}</p>
+
+          {doc.body.map((section) => (
+            <div class="api-block">
+              {section.heading && <h2>{section.heading}</h2>}
+              {section.text &&
+                section.text.split("\n\n").map((para) => (
+                  <p set:html={para} />
+                ))}
+              {section.code && (
+                <div class="code-snippet">
+                  <pre><code>{section.code}</code></pre>
+                </div>
+              )}
+              {section.table && (
+                <table class="params-table">
+                  <thead>
+                    <tr>
+                      {section.table.headers.map((h) => (
+                        <th>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {section.table.rows.map((row) => (
+                      <tr>
+                        {row.map((cell) => (
+                          <td set:html={cell} />
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {section.list && (
+                <ul>
+                  {section.list.map((item) => (
+                    <li set:html={item} />
+                  ))}
+                </ul>
+              )}
+            </div>
+          ))}
+
+          <!-- Cross-links -->
+          <div class="doc-cross-links mono">
+            <a href="/verify">Verify a live response →</a>
+            <a href="https://guarantee.rs" target="_blank" rel="noopener noreferrer">Managed deployment →</a>
+          </div>
+
+          <!-- Prev / Next -->
+          <nav class="doc-nav">
+            {prevDoc ? (
+              <a href={`/docs/${prevSlug}`} class="doc-nav-link">
+                <span class="doc-nav-label">← Previous</span>
+                <span class="doc-nav-title">{prevDoc.title}</span>
+              </a>
+            ) : (
+              <div class="doc-nav-spacer" />
+            )}
+            {nextDoc ? (
+              <a href={`/docs/${nextSlug}`} class="doc-nav-link" style="text-align: right;">
+                <span class="doc-nav-label">Next →</span>
+                <span class="doc-nav-title">{nextDoc.title}</span>
+              </a>
+            ) : (
+              <div class="doc-nav-spacer" />
+            )}
+          </nav>
+        </>
+      ) : (
+        <>
+          <h1>Page not found</h1>
+          <p>
+            No documentation found for <code>{slug}</code>.{" "}
+            <a href="/docs/getting-started">Go to Getting Started</a>.
+          </p>
+        </>
+      )}
+    </main>
+  </div>
+</Layout>

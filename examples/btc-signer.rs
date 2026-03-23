@@ -26,7 +26,7 @@
 use axum::{
     extract::Extension,
     http::StatusCode,
-    response::{IntoResponse, Json},
+    response::Json,
     routing::{get, post},
     Router,
 };

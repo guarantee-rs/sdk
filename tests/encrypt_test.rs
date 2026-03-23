@@ -1,4 +1,4 @@
-use guarantee::crypto::{Encryptable, RetiredKeyEntry};
+use guarantee::crypto::Encryptable;
 use guarantee::{state, Encrypted};
 use serde::{Deserialize, Serialize};
 

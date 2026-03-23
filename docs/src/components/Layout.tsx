@@ -50,7 +50,7 @@ export function Layout() {
     <div className="container">
       <header className={`site-header${isHome ? " site-header-home" : ""}`}>
         <div className="header-top">
-          <Link to="/" className={`logo-text${isHome ? " logo-text-home" : ""}`}>
+          <Link to="/" className="logo-text">
             Guarantee
           </Link>
           <nav className="header-nav mono">

@@ -144,15 +144,11 @@ pre code {
 
 .logo-text {
   font-family: var(--font-display);
-  font-size: 3rem;
+  font-size: clamp(3rem, 8vw, 6rem);
   font-weight: 700;
   line-height: 1;
   text-transform: uppercase;
   letter-spacing: -0.02em;
-}
-
-.logo-text-home {
-  font-size: clamp(3rem, 8vw, 6rem);
 }
 
 .header-nav {

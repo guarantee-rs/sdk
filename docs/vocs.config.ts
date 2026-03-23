@@ -19,7 +19,7 @@ export default defineConfig({
       items: [
         {
           text: "Changelog",
-          link: "https://github.com/anthropics/guarantee/releases",
+          link: "https://github.com/susruth/guarantee/releases",
         },
         {
           text: "crates.io",
@@ -31,12 +31,12 @@ export default defineConfig({
   socials: [
     {
       icon: "github",
-      link: "https://github.com/anthropics/guarantee",
+      link: "https://github.com/susruth/guarantee",
     },
   ],
   editLink: {
     pattern:
-      "https://github.com/anthropics/guarantee/edit/main/docs/pages/:path",
+      "https://github.com/susruth/guarantee/edit/main/docs/pages/:path",
     text: "Edit on GitHub",
   },
   sidebar: [

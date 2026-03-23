@@ -1,5 +1,17 @@
 use axum::{extract::Extension, response::Json, routing::get, Router};
-use guarantee::{attest, EnclaveAttestor};
+use guarantee::{attest, state};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+struct AppData {
+    request_count: u64,
+}
+
+state! {
+    #[mrenclave]
+    AppData,
+}
 
 #[attest]
 async fn hello_handler() -> Json<serde_json::Value> {
@@ -9,11 +21,12 @@ async fn hello_handler() -> Json<serde_json::Value> {
 #[tokio::test]
 async fn attest_adds_attestation_headers() {
     std::env::remove_var("GUARANTEE_ENCLAVE");
-    let attestor = EnclaveAttestor::initialize().await.unwrap();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = TeeState::initialize(dir.path()).expect("initialize");
 
     let app = Router::new()
         .route("/hello", get(hello_handler))
-        .layer(Extension(attestor));
+        .layer(Extension(Arc::new(state)));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

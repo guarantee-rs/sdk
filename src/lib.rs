@@ -16,3 +16,4 @@ pub use types::{MrEnclave, MrSigner, StartupQuote};
 
 // Re-export proc macros
 pub use guarantee_macros::state;
+pub use guarantee_macros::Encrypted;

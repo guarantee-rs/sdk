@@ -205,3 +205,106 @@ fn hex_decode(hex: &str) -> Vec<u8> {
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("valid hex"))
         .collect()
 }
+
+// --- Schema versioning tests ---
+
+#[test]
+fn schema_version_tracked() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = TeeState::initialize(dir.path()).expect("initialize");
+    // Default version is 1 (no version attribute specified in our state! macro)
+    assert_eq!(state.enclave().schema_version(), 1);
+    assert_eq!(state.signer().schema_version(), 1);
+}
+
+// Test that schema migration handles new fields via serde(default)
+mod schema_migration {
+    use serde::{Deserialize, Serialize};
+
+    // Simulate "old" state with fewer fields by manually creating sealed data
+    // that lacks a field, then unsealing with a struct that has the extra field.
+    #[test]
+    fn schema_migration_new_field_gets_default() {
+        use guarantee::seal;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let enclave_path = dir.path().join("enclave.sealed");
+
+        // Seal "old" enclave state JSON that has signing_key but no "extra_counter" field
+        // and schema_version = 0
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let old_json = serde_json::json!({
+            "schema_version": 0,
+            "signing_key": signing_key.to_bytes(),
+        });
+        let data = serde_json::to_vec(&old_json).expect("serialize old state");
+        seal::seal_to_file(&data, &enclave_path, seal::SealMode::MrEnclave)
+            .expect("seal old state");
+
+        // Now define a state! with a new field and version = 2
+        // The new field should get its default value
+        #[derive(Serialize, Deserialize, Default, Clone, Debug)]
+        struct NewFeature {
+            counter: u64,
+        }
+
+        guarantee::state! {
+            #[mrenclave(version = 2)]
+            NewFeature,
+        }
+
+        let state = TeeState::initialize(dir.path()).expect("initialize with migration");
+
+        // The new field should have its default value
+        assert_eq!(state.enclave().new_feature().counter, 0);
+        // Schema version should be upgraded to 2
+        assert_eq!(state.enclave().schema_version(), 2);
+    }
+}
+
+// Test versioned state! macro syntax
+mod versioned_syntax {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize, Default, Clone, Debug)]
+    struct SessionData {
+        token: String,
+    }
+
+    #[derive(Serialize, Deserialize, Default, Clone, Debug)]
+    struct Secrets {
+        api_key: String,
+    }
+
+    guarantee::state! {
+        #[mrenclave(version = 5)]
+        SessionData,
+
+        #[mrsigner(version = 3)]
+        Secrets,
+    }
+
+    #[test]
+    fn versioned_state_initializes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = TeeState::initialize(dir.path()).expect("initialize");
+        assert_eq!(state.enclave().schema_version(), 5);
+        assert_eq!(state.signer().schema_version(), 3);
+    }
+
+    #[test]
+    fn versioned_state_persists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let mut state = TeeState::initialize(dir.path()).expect("initialize");
+            state.enclave_mut().session_data.token = "abc".to_string();
+            state.signer_mut().secrets.api_key = "key123".to_string();
+            state.seal(dir.path()).expect("seal");
+        }
+        let state = TeeState::initialize(dir.path()).expect("re-initialize");
+        assert_eq!(state.enclave().session_data().token, "abc");
+        assert_eq!(state.signer().secrets().api_key, "key123");
+        assert_eq!(state.enclave().schema_version(), 5);
+        assert_eq!(state.signer().schema_version(), 3);
+    }
+}

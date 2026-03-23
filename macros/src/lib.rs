@@ -26,7 +26,7 @@ pub fn attest(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         #(#fn_attrs)*
         #fn_vis async fn #fn_name(
-            ::axum::extract::Extension(tee_state): ::axum::extract::Extension<::std::sync::Arc<TeeState>>,
+            ::axum::extract::Extension(tee_state): ::axum::extract::Extension<::std::sync::Arc<::tokio::sync::RwLock<TeeState>>>,
             #fn_inputs
         ) -> impl ::axum::response::IntoResponse {
             use ::axum::response::IntoResponse;
@@ -60,7 +60,9 @@ pub fn attest(_attr: TokenStream, item: TokenStream) -> TokenStream {
             };
 
             // Sign using TeeState -- signing key is never exposed
-            let header = tee_state.sign_response(&body_bytes, &request_id);
+            let state_guard = tee_state.read().await;
+            let header = state_guard.sign_response(&body_bytes, &request_id);
+            drop(state_guard);
 
             // Insert attestation headers
             if let Ok(val) = HeaderValue::from_str(&header.to_header_value()) {
@@ -108,14 +110,18 @@ enum SealSection {
 
 struct StateInput {
     mrenclave_types: Vec<Ident>,
+    mrenclave_version: u32,
     mrsigner_types: Vec<Ident>,
+    mrsigner_version: u32,
     external_types: Vec<Ident>,
 }
 
 impl Parse for StateInput {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut mrenclave_types = Vec::new();
+        let mut mrenclave_version: u32 = 1;
         let mut mrsigner_types = Vec::new();
+        let mut mrsigner_version: u32 = 1;
         let mut external_types = Vec::new();
         let mut current_section: Option<SealSection> = None;
 
@@ -125,10 +131,29 @@ impl Parse for StateInput {
                 let content;
                 syn::bracketed!(content in input);
                 let attr_name: Ident = content.parse()?;
+                // Parse optional (version = N) after the attribute name
+                let version = if !content.is_empty() {
+                    let inner;
+                    syn::parenthesized!(inner in content);
+                    let key: Ident = inner.parse()?;
+                    if key != "version" {
+                        return Err(syn::Error::new(
+                            key.span(),
+                            "expected `version`",
+                        ));
+                    }
+                    inner.parse::<Token![=]>()?;
+                    let lit: syn::LitInt = inner.parse()?;
+                    lit.base10_parse::<u32>()?
+                } else {
+                    1
+                };
                 if attr_name == "mrenclave" {
                     current_section = Some(SealSection::MrEnclave);
+                    mrenclave_version = version;
                 } else if attr_name == "mrsigner" {
                     current_section = Some(SealSection::MrSigner);
+                    mrsigner_version = version;
                 } else if attr_name == "external" {
                     current_section = Some(SealSection::External);
                 } else {
@@ -158,7 +183,9 @@ impl Parse for StateInput {
 
         Ok(StateInput {
             mrenclave_types,
+            mrenclave_version,
             mrsigner_types,
+            mrsigner_version,
             external_types,
         })
     }
@@ -214,19 +241,35 @@ pub fn state(input: TokenStream) -> TokenStream {
         .collect();
     let signer_types = &parsed.mrsigner_types;
 
+    let enclave_version = parsed.mrenclave_version;
+    let signer_version = parsed.mrsigner_version;
+
     // Generate EnclaveState struct + impl
     let enclave_state = if has_enclave {
         quote! {
+            /// Current schema version for MRENCLAVE-sealed state.
+            const ENCLAVE_SCHEMA_VERSION: u32 = #enclave_version;
+
             /// MRENCLAVE-sealed state. Reset on redeploy (new binary = new measurement).
             /// Contains an auto-generated Ed25519 signing key for per-response attestation.
             #[derive(::serde::Serialize, ::serde::Deserialize)]
             pub struct EnclaveState {
+                #[serde(default)]
+                schema_version: u32,
                 #[serde(with = "::guarantee::seal::signing_key_serde")]
                 signing_key: ::ed25519_dalek::SigningKey,
-                #(pub #enclave_fields: #enclave_types,)*
+                #(
+                    #[serde(default)]
+                    pub #enclave_fields: #enclave_types,
+                )*
             }
 
             impl EnclaveState {
+                /// Get the schema version of this state.
+                pub fn schema_version(&self) -> u32 {
+                    self.schema_version
+                }
+
                 #(
                     /// Read-only accessor for the `#enclave_fields` component.
                     pub fn #enclave_fields(&self) -> &#enclave_types {
@@ -242,15 +285,46 @@ pub fn state(input: TokenStream) -> TokenStream {
     // Generate SignerState struct + impl
     let signer_state = if has_signer {
         quote! {
+            /// Current schema version for MRSIGNER-sealed state.
+            const SIGNER_SCHEMA_VERSION: u32 = #signer_version;
+
             /// MRSIGNER-sealed state. Persists across redeploys (same signing key = same MRSIGNER).
-            /// Contains an auto-generated 256-bit master key for encrypting user data at rest.
+            /// Contains an auto-generated 256-bit master key for encrypting user data at rest,
+            /// plus key rotation metadata and retired keys for backward decryption.
             #[derive(::serde::Serialize, ::serde::Deserialize)]
             pub struct SignerState {
+                #[serde(default)]
+                schema_version: u32,
                 master_key: [u8; 32],
-                #(pub #signer_fields: #signer_types,)*
+                /// Current key version (starts at 1 on first boot).
+                #[serde(default)]
+                pub current_key_version: u32,
+                /// Key rotation interval in days (default 90).
+                #[serde(default = "default_rotation_interval")]
+                pub rotation_interval_days: u64,
+                /// RFC3339 timestamp of last rotation.
+                #[serde(default)]
+                pub last_rotation: String,
+                /// RFC3339 timestamp of next scheduled rotation.
+                #[serde(default)]
+                pub next_rotation: String,
+                /// Retired keys kept for backward decryption after rotation.
+                #[serde(default)]
+                pub retired_keys: Vec<::guarantee::crypto::RetiredKeyEntry>,
+                #(
+                    #[serde(default)]
+                    pub #signer_fields: #signer_types,
+                )*
             }
 
+            fn default_rotation_interval() -> u64 { 90 }
+
             impl SignerState {
+                /// Get the schema version of this state.
+                pub fn schema_version(&self) -> u32 {
+                    self.schema_version
+                }
+
                 #(
                     /// Read-only accessor for the `#signer_fields` component.
                     pub fn #signer_fields(&self) -> &#signer_types {
@@ -284,15 +358,35 @@ pub fn state(input: TokenStream) -> TokenStream {
             ) {
                 Ok(data) => {
                     ::tracing::info!("Unsealed MRENCLAVE state");
-                    ::serde_json::from_slice(&data).map_err(|e| {
+                    let mut state: EnclaveState = ::serde_json::from_slice(&data).map_err(|e| {
                         ::guarantee::SdkError::SealError(format!("Deserialize enclave state: {e}"))
-                    })?
+                    })?;
+                    // Check for schema migration
+                    if state.schema_version < ENCLAVE_SCHEMA_VERSION {
+                        ::tracing::warn!(
+                            old_version = state.schema_version,
+                            new_version = ENCLAVE_SCHEMA_VERSION,
+                            "Migrating MRENCLAVE state schema -- new fields get defaults"
+                        );
+                        state.schema_version = ENCLAVE_SCHEMA_VERSION;
+                        // Re-seal with updated schema version
+                        let data = ::serde_json::to_vec(&state).map_err(|e| {
+                            ::guarantee::SdkError::SealError(format!("Serialize enclave state: {e}"))
+                        })?;
+                        ::guarantee::seal::seal_to_file(
+                            &data,
+                            &enclave_path,
+                            ::guarantee::seal::SealMode::MrEnclave,
+                        )?;
+                    }
+                    state
                 }
                 Err(_) => {
                     ::tracing::info!("No existing MRENCLAVE state -- generating fresh signing key");
                     let signing_key =
                         ::ed25519_dalek::SigningKey::generate(&mut ::rand::rngs::OsRng);
                     let state = EnclaveState {
+                        schema_version: ENCLAVE_SCHEMA_VERSION,
                         signing_key,
                         #(#enclave_fields: Default::default(),)*
                     };
@@ -315,22 +409,58 @@ pub fn state(input: TokenStream) -> TokenStream {
     // Initialization code for signer state
     let signer_init = if has_signer {
         quote! {
-            let signer: SignerState = match ::guarantee::seal::unseal_from_file(
+            let mut signer: SignerState = match ::guarantee::seal::unseal_from_file(
                 &signer_path,
                 ::guarantee::seal::SealMode::MrSigner,
             ) {
                 Ok(data) => {
                     ::tracing::info!("Unsealed MRSIGNER state");
-                    ::serde_json::from_slice(&data).map_err(|e| {
+                    let mut s: SignerState = ::serde_json::from_slice(&data).map_err(|e| {
                         ::guarantee::SdkError::SealError(format!("Deserialize signer state: {e}"))
-                    })?
+                    })?;
+                    // Upgrade from version 0 (old sealed state without rotation fields)
+                    if s.current_key_version == 0 {
+                        ::tracing::info!("Upgrading signer state from version 0 to version 1");
+                        s.current_key_version = 1;
+                        let now = ::chrono::Utc::now();
+                        s.last_rotation = now.to_rfc3339();
+                        s.next_rotation = (now + ::chrono::Duration::days(s.rotation_interval_days as i64)).to_rfc3339();
+                    }
+                    // Check for schema migration
+                    if s.schema_version < SIGNER_SCHEMA_VERSION {
+                        ::tracing::warn!(
+                            old_version = s.schema_version,
+                            new_version = SIGNER_SCHEMA_VERSION,
+                            "Migrating MRSIGNER state schema -- new fields get defaults"
+                        );
+                        s.schema_version = SIGNER_SCHEMA_VERSION;
+                    }
+                    // Re-seal if any upgrade happened
+                    {
+                        let data = ::serde_json::to_vec(&s).map_err(|e| {
+                            ::guarantee::SdkError::SealError(format!("Serialize signer state: {e}"))
+                        })?;
+                        ::guarantee::seal::seal_to_file(
+                            &data,
+                            &signer_path,
+                            ::guarantee::seal::SealMode::MrSigner,
+                        )?;
+                    }
+                    s
                 }
                 Err(_) => {
                     ::tracing::info!("No existing MRSIGNER state -- generating fresh master key");
                     let mut master_key = [0u8; 32];
                     ::rand::RngCore::fill_bytes(&mut ::rand::rngs::OsRng, &mut master_key);
+                    let now = ::chrono::Utc::now();
                     let state = SignerState {
+                        schema_version: SIGNER_SCHEMA_VERSION,
                         master_key,
+                        current_key_version: 1,
+                        rotation_interval_days: 90,
+                        last_rotation: now.to_rfc3339(),
+                        next_rotation: (now + ::chrono::Duration::days(90)).to_rfc3339(),
+                        retired_keys: Vec::new(),
                         #(#signer_fields: Default::default(),)*
                     };
                     let data = ::serde_json::to_vec(&state).map_err(|e| {
@@ -414,6 +544,56 @@ pub fn state(input: TokenStream) -> TokenStream {
             pub fn signer_mut(&mut self) -> &mut SignerState {
                 &mut self.signer
             }
+
+            /// Check if key rotation is due. If so, performs the rotation and returns `true`.
+            /// Call this periodically (e.g., from a background task).
+            pub fn check_rotation(&mut self) -> Result<bool, ::guarantee::SdkError> {
+                if self.signer.next_rotation.is_empty() {
+                    return Ok(false);
+                }
+                let next = ::chrono::DateTime::parse_from_rfc3339(&self.signer.next_rotation)
+                    .map_err(|e| ::guarantee::SdkError::CryptoError(format!("Parse next_rotation: {e}")))?;
+                let now = ::chrono::Utc::now();
+                if now >= next {
+                    self.rotate_master_key()?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+
+            /// Rotate the master key: push current key to retired_keys, generate a new one,
+            /// increment the key version, and update rotation timestamps.
+            pub fn rotate_master_key(&mut self) -> Result<(), ::guarantee::SdkError> {
+                let now = ::chrono::Utc::now();
+
+                // Move current key to retired_keys
+                self.signer.retired_keys.push(::guarantee::crypto::RetiredKeyEntry {
+                    version: self.signer.current_key_version,
+                    key: self.signer.master_key,
+                    retired_at: now.to_rfc3339(),
+                    expires_at: None,
+                });
+
+                // Generate new master key
+                let mut new_key = [0u8; 32];
+                ::rand::RngCore::fill_bytes(&mut ::rand::rngs::OsRng, &mut new_key);
+                self.signer.master_key = new_key;
+
+                // Increment version
+                self.signer.current_key_version += 1;
+
+                // Update rotation timestamps
+                self.signer.last_rotation = now.to_rfc3339();
+                self.signer.next_rotation = (now + ::chrono::Duration::days(self.signer.rotation_interval_days as i64)).to_rfc3339();
+
+                ::tracing::info!(
+                    new_version = self.signer.current_key_version,
+                    retired_keys = self.signer.retired_keys.len(),
+                    "Master key rotated"
+                );
+                Ok(())
+            }
         }
     } else {
         quote! {}
@@ -481,19 +661,99 @@ pub fn state(input: TokenStream) -> TokenStream {
     let encryption_methods = if has_signer && !parsed.external_types.is_empty() {
         quote! {
             #(
-                /// Encrypt a value using a per-type derived key from the MRSIGNER-bound master key.
-                /// The key is derived at runtime via HKDF-SHA256 with purpose `"external:<type>"`.
+                /// Encrypt a value using a versioned per-type derived key from the MRSIGNER-bound master key.
+                /// The key is derived at runtime via HKDF-SHA256 with purpose `"external:<type>"`,
+                /// and the current key version is tagged in the ciphertext.
                 pub fn #encrypt_method_names(&self, value: &#external_types_ref) -> Result<#external_encrypted_names, ::guarantee::SdkError> {
-                    let key = ::guarantee::crypto::derive_key(&self.signer.master_key, #external_purpose_strings.as_bytes());
-                    value.encrypt(&key)
+                    let version = self.signer.current_key_version;
+                    value.encrypt_versioned(&self.signer.master_key, version, #external_purpose_strings.as_bytes())
                 }
 
-                /// Decrypt a value using a per-type derived key from the MRSIGNER-bound master key.
+                /// Decrypt a value using a versioned per-type derived key from the MRSIGNER-bound master key.
+                /// Supports both the old unversioned format and the new versioned format.
+                /// Automatically falls back to retired keys when needed.
                 pub fn #decrypt_method_names(&self, encrypted: &#external_encrypted_names) -> Result<#external_types_ref, ::guarantee::SdkError> {
-                    let key = ::guarantee::crypto::derive_key(&self.signer.master_key, #external_purpose_strings.as_bytes());
-                    #external_types_ref::decrypt_from(encrypted, &key)
+                    #external_types_ref::decrypt_versioned(
+                        encrypted,
+                        &self.signer.master_key,
+                        self.signer.current_key_version,
+                        &self.signer.retired_keys,
+                        #external_purpose_strings.as_bytes(),
+                    )
                 }
             )*
+        }
+    } else {
+        quote! {}
+    };
+
+    // Backup metadata JSON: include whichever schema versions are defined
+    let backup_metadata_json = match (has_enclave, has_signer) {
+        (true, true) => quote! {
+            ::serde_json::json!({
+                "backed_up_at": ::chrono::Utc::now().to_rfc3339(),
+                "enclave_schema_version": ENCLAVE_SCHEMA_VERSION,
+                "signer_schema_version": SIGNER_SCHEMA_VERSION,
+            })
+        },
+        (true, false) => quote! {
+            ::serde_json::json!({
+                "backed_up_at": ::chrono::Utc::now().to_rfc3339(),
+                "enclave_schema_version": ENCLAVE_SCHEMA_VERSION,
+            })
+        },
+        (false, true) => quote! {
+            ::serde_json::json!({
+                "backed_up_at": ::chrono::Utc::now().to_rfc3339(),
+                "signer_schema_version": SIGNER_SCHEMA_VERSION,
+            })
+        },
+        (false, false) => quote! {
+            ::serde_json::json!({
+                "backed_up_at": ::chrono::Utc::now().to_rfc3339(),
+            })
+        },
+    };
+
+    let backup_enclave_copy = if has_enclave {
+        quote! {
+            let enclave_src = seal_dir.join("enclave.sealed");
+            if enclave_src.exists() {
+                ::std::fs::copy(&enclave_src, backup_dir.join("enclave.sealed"))?;
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let backup_signer_copy = if has_signer {
+        quote! {
+            let signer_src = seal_dir.join("signer.sealed");
+            if signer_src.exists() {
+                ::std::fs::copy(&signer_src, backup_dir.join("signer.sealed"))?;
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let restore_enclave_copy = if has_enclave {
+        quote! {
+            let enclave_backup = backup_dir.join("enclave.sealed");
+            if enclave_backup.exists() {
+                ::std::fs::copy(&enclave_backup, seal_dir.join("enclave.sealed"))?;
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let restore_signer_copy = if has_signer {
+        quote! {
+            let signer_backup = backup_dir.join("signer.sealed");
+            if signer_backup.exists() {
+                ::std::fs::copy(&signer_backup, seal_dir.join("signer.sealed"))?;
+            }
         }
     } else {
         quote! {}
@@ -537,6 +797,42 @@ pub fn state(input: TokenStream) -> TokenStream {
 
                 #seal_enclave
                 #seal_signer
+
+                Ok(())
+            }
+
+            /// Backup sealed state files to a backup directory.
+            /// Copies enclave.sealed, signer.sealed, and writes backup_metadata.json.
+            pub fn backup(
+                &self,
+                seal_dir: &::std::path::Path,
+                backup_dir: &::std::path::Path,
+            ) -> Result<(), ::guarantee::SdkError> {
+                ::std::fs::create_dir_all(backup_dir)?;
+
+                #backup_enclave_copy
+                #backup_signer_copy
+
+                let metadata = #backup_metadata_json;
+                ::std::fs::write(
+                    backup_dir.join("backup_metadata.json"),
+                    ::serde_json::to_string_pretty(&metadata).map_err(|e| {
+                        ::guarantee::SdkError::SealError(format!("Serialize backup metadata: {e}"))
+                    })?,
+                )?;
+
+                Ok(())
+            }
+
+            /// Restore sealed state from a backup directory to the seal directory.
+            pub fn restore(
+                backup_dir: &::std::path::Path,
+                seal_dir: &::std::path::Path,
+            ) -> Result<(), ::guarantee::SdkError> {
+                ::std::fs::create_dir_all(seal_dir)?;
+
+                #restore_enclave_copy
+                #restore_signer_copy
 
                 Ok(())
             }
@@ -609,6 +905,8 @@ fn impl_encrypted(input: &DeriveInput) -> syn::Result<TokenStream> {
     let mut encrypted_field_defs = Vec::new();
     let mut encrypt_exprs = Vec::new();
     let mut decrypt_exprs = Vec::new();
+    let mut encrypt_versioned_exprs = Vec::new();
+    let mut decrypt_versioned_exprs = Vec::new();
 
     for field in fields {
         let field_name = field.ident.as_ref().ok_or_else(|| {
@@ -628,6 +926,12 @@ fn impl_encrypted(input: &DeriveInput) -> syn::Result<TokenStream> {
             decrypt_exprs.push(quote! {
                 #field_name: ::guarantee::crypto::decrypt_field(&encrypted.#field_name, key)?
             });
+            encrypt_versioned_exprs.push(quote! {
+                #field_name: ::guarantee::crypto::encrypt_field_versioned(&self.#field_name, key, version, purpose)?
+            });
+            decrypt_versioned_exprs.push(quote! {
+                #field_name: ::guarantee::crypto::decrypt_field_versioned(&encrypted.#field_name, current_key, current_version, retired_keys, purpose)?
+            });
         } else {
             // Non-encrypted field: keep the same type, clone the value
             encrypted_field_defs.push(quote! {
@@ -639,12 +943,19 @@ fn impl_encrypted(input: &DeriveInput) -> syn::Result<TokenStream> {
             decrypt_exprs.push(quote! {
                 #field_name: encrypted.#field_name.clone()
             });
+            encrypt_versioned_exprs.push(quote! {
+                #field_name: self.#field_name.clone()
+            });
+            decrypt_versioned_exprs.push(quote! {
+                #field_name: encrypted.#field_name.clone()
+            });
         }
     }
 
     let output = quote! {
         /// Encrypted version of [`#name`]. Fields marked `#[encrypt]` contain
-        /// AES-256-GCM ciphertext in the format `enc:v1:<nonce_hex>:<ciphertext_hex>`.
+        /// AES-256-GCM ciphertext in the format `enc:v1:<nonce_hex>:<ciphertext_hex>`
+        /// or the versioned format `enc:v1:k<N>:<nonce_hex>:<ciphertext_hex>`.
         #[derive(::serde::Serialize, ::serde::Deserialize, Debug, Clone)]
         pub struct #encrypted_name {
             #(#encrypted_field_defs,)*
@@ -662,6 +973,29 @@ fn impl_encrypted(input: &DeriveInput) -> syn::Result<TokenStream> {
             fn decrypt_from(encrypted: &#encrypted_name, key: &[u8; 32]) -> Result<Self, ::guarantee::SdkError> {
                 Ok(#name {
                     #(#decrypt_exprs,)*
+                })
+            }
+
+            fn encrypt_versioned(
+                &self,
+                key: &[u8; 32],
+                version: u32,
+                purpose: &[u8],
+            ) -> Result<#encrypted_name, ::guarantee::SdkError> {
+                Ok(#encrypted_name {
+                    #(#encrypt_versioned_exprs,)*
+                })
+            }
+
+            fn decrypt_versioned(
+                encrypted: &#encrypted_name,
+                current_key: &[u8; 32],
+                current_version: u32,
+                retired_keys: &[::guarantee::crypto::RetiredKeyEntry],
+                purpose: &[u8],
+            ) -> Result<Self, ::guarantee::SdkError> {
+                Ok(#name {
+                    #(#decrypt_versioned_exprs,)*
                 })
             }
         }

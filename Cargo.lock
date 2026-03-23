@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "guarantee"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "guarantee-macros"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "guarantee"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT"
 description = "TEE attestation SDK for Rust — cryptographic proof that your code runs in a Trusted Execution Environment"
